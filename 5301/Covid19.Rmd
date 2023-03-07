@@ -1,0 +1,175 @@
+---
+title: "Covid-19 Analysis"
+author: "Stephen Zavaleta"
+date: "2023-02-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("tidyverse")
+library("lubridate")
+library("dplyr")
+library("ggplot2")
+options(dplyr.summarise.inform = FALSE)
+```
+
+I will be analyzing data on the Covid-19 pandemic using the Johns Hopkins US time series data. This data is reported at the county level, contains cumulative case and death count as well as population, and goes from Januaray of 2020 to the day before you run this.
+
+### Analysis Plan
+
+After getting some general trends on the pandemic, I will be specifically investigating the two counties that I considered spending the pandemic in: King County, Washington where I currently live in Seattle, and Fairfax County, Virginia, where my family lives. I hope to learn where the safest place to spend the pandemic is
+
+## Setup
+
+First, I'll import the data. The cases and deaths are reported separately, so I have to combine them at the end. Each dataset contains dates on the entire row, but I'll pivot the data to put the dates on each line. I'll also rename the county and state columns to be more conventional, turn the date string into a date object, and filter out counties with a population of 0 (which will cause problems with relative rates)
+
+
+```{r import data}
+base_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+us_cases_url <- str_c(base_url, "time_series_covid19_confirmed_US.csv")
+us_deaths_url <- str_c(base_url, "time_series_covid19_deaths_US.csv")
+
+us_cases <- read_csv(us_cases_url)
+us_deaths <- read_csv(us_deaths_url)
+
+# tidy
+us_cases <- pivot_longer(us_cases, cols = -c("UID", "iso2", "iso3", "code3", "FIPS", "Admin2", "Province_State", "Country_Region", "Combined_Key", "Lat", "Long_"), names_to = "date", values_to = "cases") %>%
+  rename(county = Admin2, state = Province_State ) %>% 
+  mutate(date = mdy(date))  %>%
+  select(c("state", "county", "date", "cases"))
+
+us_deaths <- pivot_longer(us_deaths, cols = -c("UID", "iso2", "iso3", "code3", "FIPS", "Admin2", "Province_State", "Country_Region", "Combined_Key", "Lat", "Long_", "Population"), names_to = "date", values_to = "deaths") %>%
+  rename(county = Admin2, state = Province_State, population = Population ) %>% 
+  mutate(date = mdy(date))  %>% 
+  select(c("state","county", "date", "deaths", "population"))
+us_combined <- full_join(us_deaths, us_cases)  %>% filter(population > 0)
+```
+## Pandemic Overview
+
+How have cases and deaths grown over time? I'll get totals for each date and plot them in a time series
+``` {r graph}
+us_totals <- us_combined %>% group_by(date) %>% summarize(cases = sum(cases), deaths = sum(deaths), population = sum(population))
+
+ggplot(us_totals, aes(x = date, y = cases)) + geom_line(aes(color = "cases")) + geom_line(aes(y = deaths, color = "deaths")) + scale_y_log10() + ggtitle("Total US Cases and Deaths") + theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+The pandemic continues to grow steadily, but the rate at which it is increasing seems to be leveling off
+
+## Which county is most dangerous overall?
+### Total Case and Death rates
+
+A natural point of comparison is the overall rate at which people get and die from Covid. I'll calculate the rate per 1000 to keep the numbers large enough to think about. Note that when summarizing grouped deaths and cases, we take the max since the running totals are reported
+``` {r totals which is safer}
+us_by_county <- us_combined %>% group_by(county, state) %>% 
+  summarize(cases = max(cases), deaths = max(deaths), population = max(population)) %>% ungroup() %>%
+  mutate(deaths_per_k = deaths * 1000 / population, cases_per_k = cases * 1000 / population) %>%
+  select(c(state, county, deaths_per_k, cases_per_k))
+
+fairfax_rates = us_by_county %>% filter(state == "Virginia", county == "Fairfax")
+king_rates = us_by_county %>% filter(state == "Washington", county == "King")
+str_c("Fairfax has ", fairfax_rates$cases_per_k, " cases per thousand and ", fairfax_rates$deaths_per_k, " deaths per thousand")
+str_c("King has ", king_rates$cases_per_k, " cases per thousand and ", king_rates$deaths_per_k, " deaths per thousand")
+
+```
+
+It seems that King County has slightly more cases and deaths overall than Fairfax, but in isolation, they seem relatively close
+
+### New Cases over time
+
+Totals are good information, but it's been a three year pandemic. Let's investigate when the best time to be in each county is based on their relative new case rate. That is, for a given date, which place has a greater number of new cases per thousand people.
+
+``` {r prepare rates }
+us_rates <- us_combined %>% mutate(new_cases_rate = 1000*(cases - lag(cases)) / population, new_deaths_rate = 1000*(deaths - lag(deaths))/population) 
+
+fairfax_new_rates <- us_rates %>%filter(state == "Virginia", county == "Fairfax") %>% 
+  rename(new_fairfax_cases_rate = new_cases_rate, new_fairfax_deaths_rate = new_deaths_rate) %>% 
+  ungroup() %>%
+  select(date, new_fairfax_cases_rate, new_fairfax_deaths_rate)
+  
+king_new_rates <- us_rates %>%filter(state == "Washington", county == "King") %>% 
+  rename(new_king_cases_rate = new_cases_rate, new_king_deaths_rate = new_deaths_rate) %>%
+  ungroup() %>%
+  select(date, new_king_cases_rate, new_king_deaths_rate)
+
+comparable_rates <- full_join(fairfax_new_rates, king_new_rates) %>% mutate(case_rate_diff = new_fairfax_cases_rate - new_king_cases_rate, death_rate_diff = new_fairfax_deaths_rate - new_king_deaths_rate)
+
+```
+
+``` {r cases}
+
+ggplot(comparable_rates, aes(x = date, y = case_rate_diff)) + geom_line(aes(color = "case_rate_diff")) + ggtitle("Difference Between New Fairfax and King Cases") + theme(plot.title = element_text(hjust = 0.5)) + ylab("New Case Rate Difference")
+```
+
+It seems there's actually a great deal of correlation between the two case rates, since it hovers around 0 and crosses very often. Starting in 2022, the difference in case rate is more dramatic though not consistent.  It may have been slightly better to be in King county in early 2020 and early 2023, and better to be in Fairfax the summer of 2022. 
+
+
+``` {r deaths}
+ggplot(comparable_rates, aes(x = date, y = death_rate_diff)) + geom_line(aes(color = "death_rate_diff")) + ggtitle("Difference Between New Fairfax and King Deaths") + theme(plot.title = element_text(hjust = 0.5)) + ylab("New Case Rate Difference")
+```
+
+This shows a largely similar pattern to the death rate diff, though with wider swings caused by sparser data. The differences are sustained only early in the pandemic, with more deaths earlier in King and then later more deaths in Fairfax. 
+
+## Just how similar are they?
+
+Given that case and death rates for the two counties look so similar, maybe they are driven more about the wider country conditions. So let's switch tactics, from trying to show how different the counties are to showing how similar they are. Let's build a model that predicts the new case rate of Fairfax based on the new case rate of King. 
+
+
+``` {r are rates the same}
+comparable_rates <- comparable_rates
+ cross_county_cases_model <- lm(new_fairfax_cases_rate ~ new_king_cases_rate, data = comparable_rates)
+ cross_county_deaths_model <- lm(new_fairfax_deaths_rate ~ new_king_deaths_rate, data = comparable_rates)
+ 
+ summary(cross_county_cases_model)
+ summary(cross_county_deaths_model)
+```
+
+Interesting to see that there is a fractional coefficient for the King county rates, which would indicate fewer Fairfax cases and Deaths. Let's visualize this to see how the predictions compare to the actuals.
+
+### Visualize Case Predictions
+
+``` {r visualizing cases model}
+cross_county_predictions <- comparable_rates %>% mutate(predicted_fairfax_cases_rate = predict(cross_county_cases_model), predicted_fairfax_deaths_rate = predict(cross_county_deaths_model))
+ggplot(cross_county_predictions, aes(x = date, y=new_fairfax_cases_rate)) + geom_point() + geom_point(aes(y = predicted_fairfax_cases_rate, color = "Predicted Fairafx Case Rate")) + ggtitle("Predicted and Actual Fairfax Case Rates") + theme(plot.title = element_text(hjust = 0.5)) + ylab("Cases Per Thousand")
+```
+
+
+Visually, the prediction for Fairfax cases based on King case does pretty well, though the R-squared value is low. I believe this model trades predicting slightly higher cases when case rate is very low for predicitng slightly lower cases when case rate is high. This would be a function of the y intercept in the model. Let's look close at two months to see if we can see that effect. 
+
+
+``` {r zoom in}
+two_month_predictions <- cross_county_predictions %>% filter(date > '2020-03-15') %>% filter(date < '2020-05-15')
+ggplot(two_month_predictions, aes(x = date, y=new_fairfax_cases_rate)) + geom_point() + geom_point(aes(y = predicted_fairfax_cases_rate, color = "Predicted Fairafx Case Rate")) + ggtitle("Two Months Predicted and Actual Fairfax Case Rates") + theme(plot.title = element_text(hjust = 0.5)) + ylab("Cases Per Thousand")
+```
+
+
+Indeed, the model seems to be anchored around the intercept of 0.1, moving very slightly.
+
+### Visualizing Death Rates
+
+``` {r visualizing deaths model}
+ggplot(cross_county_predictions, aes(x = date, y=new_fairfax_deaths_rate)) + geom_point(aes(color = "Actual Fairfax Death Rates")) + geom_point(aes(y = predicted_fairfax_deaths_rate, color = "Predicted Fairfax Death Rates")) + ggtitle("Predicted and Actual Fairfax Death Rates") + theme(plot.title = element_text(hjust = 0.5)) + ylab("Deaths Per Thousand")
+```
+
+The deaths model does much worse, missing nearly all outliers. I hypothesize this because the death rate is so low usually that its a safe bet that it is really low.
+
+## Conclusion
+
+I undertook this analysis to find which county was a safer place to be. I found that neither county significantly outperforms the other on my main metrics, cases per thousand and deaths per thousand, though King county had slightly higher of both. Using the new cast rate per thousand and new death rate per thousand, I hoped to find a time when one county out performed the other. However, the only clear time periods where this was true was very early in the pandemic, which reach king county first (and was higher for a time) then Fairfax (which in turn was higher for a time).
+
+I then tested the opposite hypothesis, that the counties were basically the same. I made a linear model that predicted the new case (and death) rate of Fairfax based on the new case (and death) rate of King. The case model was a reasonable fit, but both models failed to predict the outlying bursts of new cases, which are the most important part!
+ 
+### Bias
+
+Though presented here as a coherent dataset, there is not a good reason to believe that Covid data reporting is identical in every county in the US. Reported cases are partly a function of whether people choose to get tested, causing possibly significant undercounting. As the pandemic progresses, more cases may be diagnosed with at home rapid tests, which also may not show up in the data. This may cause case rates to look lower than reality.
+Covid deaths are much more likely to be counted at all, but there is inherent ambiguity when a person dies with Covid and multiple other comorbidities. This may artificially inflate the death rate. 
+Reporting of both cases and deaths also show a strong day of week effect, where there is less reporting on weekends and higher than normal reporting on the weekend. If this effect is equally strong in all counties, than a comparison is still reasonable.
+
+## Session info
+
+```{r info, echo=FALSE}
+sessionInfo()
+```
+                 

@@ -1,0 +1,125 @@
+---
+title: "NYPD Shooting Historic"
+author: "Stephen Zavaleta"
+date: "2023-02-08"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("tidyverse")
+library("lubridate")
+library("dplyr")
+library("ggplot2")
+```
+
+# Investigation Into Shooting Incidents in NYC
+## Setup
+First, read in data from the source
+```{r read}
+shooting_incidents_url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+shooting_incidents <- read.csv(shooting_incidents_url)
+```
+Then, transform date columns to dates, rename a cumbersome column name, and select columns of interest
+
+```{r tidying}
+shooting_incidents <- shooting_incidents %>% 
+                            mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+                            rename(MURDER = `STATISTICAL_MURDER_FLAG`) %>%
+                            select(c(OCCUR_DATE, MURDER, VIC_RACE))
+summary(shooting_incidents)
+```
+## Initial Analysis
+### Which race  is vicitmized by shootings most often?
+```{r most by borough}
+count(shooting_incidents, VIC_RACE)
+```
+Look like Black people are victimized the most by a good margin
+
+### What percent of shootings are murders?
+
+```{r percent murder}
+incidents_counted <- transform(shooting_incidents, murder = ifelse(MURDER=="true", 1, 0), shooting = 1) %>% summarise(murders = sum(murder), shootings = sum(shooting))
+murder_count <- incidents_counted$murders
+total_count <- murder_count + incidents_counted$shootings
+print(100 * murder_count / total_count)
+
+```
+
+This seems surprisingly low to me, but that's almost surely a function of my lack of familiarity with this kind of data.
+
+## Visualizations
+
+Let's see how the number of murders and shootings evolve over time
+
+```{r counts of shootings and murders}
+grouped_by_murder <- transform(shooting_incidents, murder = ifelse(MURDER=="true", 1, 0), shooting = 1) %>% group_by(month = floor_date(OCCUR_DATE, "month")) %>% summarise(murders = sum(murder), shootings = sum(shooting))
+
+ggplot(grouped_by_murder, aes(x = month, y = shootings)) + geom_line(aes(color = "shootings")) + geom_point(aes(color = "shootings")) + geom_line( aes(y = murders, color = "murders")) + geom_point(aes(y = murders, color = "murders")) 
+```
+
+It looks like shootings are pretty cyclic throughout the year. There was a drop in shootings in the early 2010s but a fast spike starting in 2020, the year of the pandemic and one notable for its protests. The recent increase is undesirable and reverses a long trend, so it is probably worth further investigation.
+
+Given the jump during the black lives matter protests, let's take a look at the break down of shooting victims by race
+
+``` {r race shooting incidents over time}
+options(dplyr.summarise.inform = FALSE)
+monthly_vic_race_percentages = shooting_incidents %>% transform(one_count = 1) %>% group_by(month = floor_date(OCCUR_DATE, "month"), VIC_RACE)  %>% summarise(monthly_total = sum(one_count)) %>% mutate(monthly_percent = 100 * monthly_total/sum(monthly_total))
+
+#Pivot to get race victimiazation percentages as columns, select the largest
+pivoted <- pivot_wider(monthly_vic_race_percentages, id_cols = c(month), names_from= VIC_RACE, values_from = monthly_percent) %>% select(month,BLACK, `BLACK HISPANIC`, WHITE, `WHITE HISPANIC` )
+
+#fill in missing values
+pivoted[is.na(pivoted)] <- 0
+
+#graph
+ggplot(pivoted, aes(x = month, y = BLACK)) + geom_line(aes(color = "BLACK")) + geom_point(aes(color = "BLACK")) + geom_line( aes(y = WHITE, color = "WHITE")) + geom_point(aes(y = WHITE, color = "WHITE")) + geom_line( aes(y = `BLACK HISPANIC`, color = "`BLACK HISPANIC`")) + geom_point(aes(y = `BLACK HISPANIC`, color = "`BLACK HISPANIC`"))+ geom_line( aes(y = `WHITE HISPANIC`, color = "`WHITE HISPANIC`")) + geom_point(aes(y = `WHITE HISPANIC`, color = "`WHITE HISPANIC`")) + ylab("Shooting Incidents")
+```
+There doesn't seem to be a huge change in percentages over time, but it is clear the Black people are consistently the greatest percentage of shooting victims
+
+## Model: Predicting Murders from Shootings
+
+Let's make a simple model to predict number of murders based on number of shootings
+
+``` {r model}
+incidents_counted <- transform(shooting_incidents, murder = ifelse(MURDER=="true", 1, 0), shooting = 1) %>% group_by(month = floor_date(OCCUR_DATE, "month"))  %>% summarise(murders = sum(murder), shootings = sum(shooting))
+
+model <- lm(murders ~ shootings, data = incidents_counted)
+model
+```
+
+Though its implausible to have 1.1 murders on 0 shootings, the slop indicates about 18% of shootings there after are murders. Let's graph predicted murders vs actual
+
+``` {r predictions}
+incidents_with_prediction <- incidents_counted %>% mutate(prediction = predict(model))
+
+ggplot(incidents_with_prediction, aes(x = murders, y = murders)) + geom_line(aes(color = "murders")) + geom_point(aes(color = "murders")) + geom_line( aes(y = prediction, color = "predicted murders")) + geom_point(aes(y = prediction, color = "predicted murders")) + ylab("(predicted) murders")
+```
+
+Here we see the model follows roughly the same pattern, with a roughly equal number of over and under predictions. It does seem that the slope is just a little bit shallow, overpredicting murders when there are few and under predicting murders when there are many. 
+
+``` {r sorted predictions}
+incidents_with_prediction_diff <- incidents_with_prediction %>% mutate(prediction_diff = murders-prediction)
+
+ggplot(incidents_with_prediction_diff, aes(x = month, y = prediction_diff)) + geom_line(aes(color = "prediction_diff")) + geom_point(aes(color = "prediction_diff")) + ylab("Difference between Murders and Predicted Murders")
+```
+The model seems to behave equally well through time, indicating that shootings are not getting more fatal
+
+## Bias
+
+I come from a privileged background without much real life experiences with shootings. This makes it difficult to sanity check the data source.
+
+### Murder classification
+
+While every shooting is classified as a murder or not, this classification is not self evident. Are they just all shootings where the victim is deceased? If so, how does that handle accidental deaths or suicides? This might result in over count. If positive evidence is needed to rule out an accidental death, and these accidental deaths are not counter as murder, we may be dramatically undercounting, since the circumstances may not be well known
+
+### Race classification
+
+Races are not an unambiguous concept and it remains unclear how to handle split categories like "black" vs "black hispanic". I chose to limit my analysis to victim race, since perpetrator race was very sparse, with plenty of complicated reasons it might not be known.
+
+
+My session:
+```{r info, echo=FALSE}
+sessionInfo()
+```
+                            
